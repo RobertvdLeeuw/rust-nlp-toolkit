@@ -38,29 +38,35 @@ impl Matrix {
         Matrix::_create(&vec![vec![value; rows]; cols])
     }
 
+    fn get_cofactor(&self, i: usize, j: usize) -> f32 {
+        let minor_data: Vec<Vec<f32>> = self.data[0..i]
+                                            .iter()
+                                            .chain(self.data[i+1..].iter())
+                                            .map(|row| row[0..j].iter()
+                                                                .chain(row[j+1..].iter())
+                                                                .cloned()
+                                                                .collect()
+                                                )
+                                            .collect();
+        let minor = Matrix::_create(&minor_data);
+
+        f32::powi(-1.0, (i+j) as i32) * minor._calc_determinant()
+    }
+
+    fn get_cofactor_matrix(&self) -> Matrix {  // TODO: All this shit as attributes.
+        Matrix::_create(&(0..self.shape[0]).map(|i| (0..self.shape[1]).map(|j| self.get_cofactor(i, j))
+                                                                      .collect())
+                                           .collect())
+    }
+
     fn _calc_determinant(&self) -> f32 {  // TODO: Rewrite without recursion + matrix creation and
                                           // compare speed.
         if self.shape[0] == 2 {
             return self.data[0][0] * self.data[1][1] - self.data[0][1] * self.data[1][0];
         }
 
-        let mut det = 0.0;
-        for j in 0..self.shape[1] {
-            let minor_data: Vec<Vec<f32>> = self.data[1..]
-                                                .iter()
-                                                .map(|row| row[0..j].iter()
-                                                                    .chain(row[j+1..].iter())
-                                                                    .cloned()
-                                                                    .collect()
-                                                    )
-                                                .collect();
-            let minor = Matrix::_create(&minor_data);
-
-
-            det += f32::powi(-1.0, j as i32) * self.data[0][j] * minor._calc_determinant();
-        }
-
-        det
+        (0..self.shape[1]).map(|j| self.get_cofactor(0, j) * self.data[0][j])
+                          .sum()
     }
 
     fn get_determinant(&self) -> Result<f32, String> {
@@ -73,6 +79,19 @@ impl Matrix {
             1 => Ok(self.data[0][0]),
             _ => Ok(self._calc_determinant())
         }
+    }
+
+    fn inverse(&self) -> Result<Matrix, String> {
+        let det: f32;
+
+        match self.get_determinant() {
+            Ok(d) => if d == 0.0 {return Err("Det == 0, so no inverse matrix exists.".to_string())} else {det = d},
+            Err(e) => return Err(e)
+        }
+        
+        let adjugate = self.get_cofactor_matrix().transpose();
+
+        Ok(&adjugate / det)
     }
 
     fn transpose(&self) -> Matrix {
@@ -96,6 +115,7 @@ impl Matrix {
         for row in &self.data {
             println!("{:?}", row);
         }
+
         println!("-----------------------------");
     }
 
@@ -232,8 +252,6 @@ impl Div<f32> for &Matrix {
 // TODO
 // Cross product
 // Hamarand product
-// Determinant
-//
 
 fn main() {
     let matrix1 = Matrix::from(vec![
@@ -265,4 +283,8 @@ fn main() {
     (&matrix1 * &matrix1.transpose()).expect("").print("Times");
 
     println!("DETERMINANT: {}", matrix2.get_determinant().expect(""));
+    matrix2.inverse().expect("").print("Inverse");
 }
+
+
+// TODO: N DIMENSION TENSOR: data: Vec<T> where T = Vec<T> or f32
