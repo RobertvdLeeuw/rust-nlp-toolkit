@@ -1,0 +1,4 @@
+[package]
+name = "rust-nlp-toolkit"
+
+[dependencies]
