@@ -1,13 +1,14 @@
 use std::collections::HashMap;
-use std::iter::FromIterator;
+use std::iter::{FromIterator, Iterator, Sum};
 use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
+use std::slice::Iter as SliceIter;
 
-#[derive(Debug)]
-enum Tensor {
+
+#[derive(Clone, Debug)]
+pub enum Tensor {
     Scalar(f32),
     NTensor(Vec<Tensor>, usize)
 }
-
 
 impl Index<usize> for Tensor {
     type Output = Tensor;
@@ -36,23 +37,60 @@ impl FromIterator<Tensor> for Tensor {
 
         match vec[0].clone() {
             Tensor::Scalar(_) => Tensor::NTensor(vec, 1),
-            Tensor::NTensor(_, n_dim) => Tensor::NTensor(vec, n_dim+1)
+            Tensor::NTensor(_, rank) => Tensor::NTensor(vec, rank+1)
         }
     }
 }
 
 
-impl Tensor {
-    fn clone(&self) -> Tensor {
+// Iter shit was all Claude.ai
+enum TensorIter<'a> {
+    Scalar(std::iter::Once<&'a Tensor>),
+    NTensor(SliceIter<'a, Tensor>),
+}
+
+impl<'a> Iterator for TensorIter<'a> {
+    type Item = &'a Tensor;
+
+    fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Tensor::Scalar(val) => Tensor::Scalar(val.clone()),
-            Tensor::NTensor(ten, n_dim) => ten.iter()
-                                              .map(|t| t.clone())
-                                              .collect()
+            TensorIter::Scalar(iter) => iter.next(),
+            TensorIter::NTensor(iter) => iter.next(),
+        }
+    }
+}
+
+// Implement IntoIterator for &Tensor to allow for..in loops
+impl<'a> IntoIterator for &'a Tensor {
+    type Item = &'a Tensor;
+    type IntoIter = TensorIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+
+impl Sum for Tensor {
+    fn sum<I>(iter: I) -> Tensor
+    where
+        I: Iterator<Item = Tensor>,
+    {
+        iter.fold(Tensor::Scalar(0.0), |acc, x| &acc + &x)
+
+    }
+}
+
+
+impl Tensor {
+    pub fn iter(&self) -> TensorIter {
+        match self {
+            Tensor::Scalar(_) => TensorIter::Scalar(std::iter::once(self)),
+            Tensor::NTensor(ref tensors, _) => TensorIter::NTensor(tensors.iter()),
         }
     }
 
-    fn shape(&self) -> Vec<usize> {
+    pub fn shape(&self) -> Vec<usize> {
         match self {
             Tensor::Scalar(_) => vec![],
             Tensor::NTensor(vec, _) => {
@@ -64,13 +102,17 @@ impl Tensor {
         }
     }
 
-        fn get_size(&self, dim: usize) -> usize {
+    pub fn get_size(&self, dim: usize) -> usize {
         match self {
-            Tensor::Scalar(_) => 1,
-            Tensor::NTensor(ten, _) => {
+            Tensor::Scalar(_) => if dim == 0 {1} else {panic!("Scalars don't have dimensions")},
+            Tensor::NTensor(ten, rank) => {
+                if dim >= *rank {
+                    panic!("Dimension {} is out of bounds for tensor of rank {}", dim, rank);
+                }
                 if dim == 0 {
                     ten.len()
                 } else {
+                    // Assume all sub-tensors have the same shape
                     ten[0].get_size(dim - 1)
                 }
             }
@@ -93,20 +135,27 @@ impl Tensor {
     fn get_slice(&self, dim: usize, index: usize) -> Tensor {
         match self {
             Tensor::Scalar(_) => self.clone(),
-            Tensor::NTensor(ten, n_dim) => {
+            Tensor::NTensor(ten, rank) => {
                 if dim == 0 {
                     ten[index].clone()
                 } else {
                     Tensor::NTensor(
                         ten.iter().map(|t| t.get_slice(dim - 1, index)).collect(),
-                        *n_dim
+                        *rank
                     )
                 }
             }
         }
     }
+    
+    pub fn rank(&self) -> usize {
+        match self {
+            Tensor::Scalar(_) => 0,
+            Tensor::NTensor(_, rank) => *rank
+        }
+    }
 
-    fn identity(size: usize, dimensions: usize) -> Tensor {
+    pub fn identity(size: usize, dimensions: usize) -> Tensor {
         if size <= 0 {
             panic!("Size must be > 0");
         }
@@ -118,7 +167,7 @@ impl Tensor {
 
         fn recursive_traverse(td: &Tensor, i: usize) -> Tensor {
             match td.clone() {
-                Tensor::NTensor(mut vec, n_dim) => {
+                Tensor::NTensor(mut vec, rank) => {
                     match vec[i] {
                         Tensor::Scalar(_) => {
                             vec[i] = Tensor::Scalar(1.0);
@@ -128,19 +177,23 @@ impl Tensor {
                         },
                     }
                     
-                    Tensor::NTensor(vec, n_dim)
+                    Tensor::NTensor(vec, rank)
                 },
                 _ => panic!("Recursive traverse error, write this later!"),
             }
         }
         
-        Ok(Tensor::filled(0.0, vec![size; dimensions]).iter()
-                                                      .zip()
-                                                      .map(|(t)| t[i] = recursive_traverse(&t[i], i))
-                                                      .into::<Tensor>())
+        Tensor::filled(0.0, vec![size; dimensions]).iter()
+                                                   .zip(0..size)
+                                                   .map(|(t, i)| {
+                                                        let mut t_clone = t.clone();
+                                                        t_clone[i] = recursive_traverse(&t_clone[i], i);
+                                                        t_clone
+                                                   })
+                                                   .collect()
     }
 
-    fn filled(value: f32, dimensions: Vec<usize>) -> Tensor {
+    pub fn filled(value: f32, dimensions: Vec<usize>) -> Tensor {
         if dimensions.is_empty() {
             return Tensor::Scalar(value);
         }
@@ -150,7 +203,7 @@ impl Tensor {
                         dimensions.len())
     }
 
-    fn transpose_swap(&self, mut a: usize, mut b: usize) -> Tensor {
+    pub fn transpose(&self, mut a: usize, mut b: usize) -> Tensor {
         if a == b {
             return self.clone();
         }
@@ -161,56 +214,302 @@ impl Tensor {
         
         match self {
             Tensor::Scalar(v) => Tensor::Scalar(*v),
-            Tensor::NTensor(ten, n_dim) => {
+            Tensor::NTensor(ten, rank) => {
                 if a == 0 {
-                    if b == n_dim - 1 {  // Swap with innermost
+                    if b == rank - 1 {  // Swap with innermost
                         let mut new = Vec::new();
                         for i in 0..ten[0].get_size(b - 1) {
                             new.push(Tensor::NTensor(
                                 ten.iter().map(|t| t.get_element(b - 1, i)).collect(),
-                                *n_dim
+                                *rank
                             ));
                         }
-                        Tensor::NTensor(new, *n_dim)
+                        Tensor::NTensor(new, *rank)
                     } else {  // Swap with other (not innermost)
                         let mut new = Vec::new();
                         for i in 0..ten[0].get_size(b - 1) {
                             new.push(Tensor::NTensor(
                                 ten.iter().map(|t| t.get_slice(b - 1, i)).collect(),
-                                *n_dim
+                                *rank
                             ));
                         }
-                        Tensor::NTensor(new, *n_dim)
+                        Tensor::NTensor(new, *rank)
                     }
                 } else {  // Swap is 'deeper'
                     Tensor::NTensor(
                         ten.iter()
-                           .map(|t| t.transpose_swap(a - 1, b - 1))
+                           .map(|t| t.transpose(a - 1, b - 1))
                            .collect(),
-                        *n_dim
+                        *rank
                     )
                 }
             }
         }
     }
 
-    fn transpose(&self, new_order: Vec<usize>) -> Tensor {
+    pub fn full_transpose(&self, new_order: Vec<usize>) -> Tensor {
         match self {
             Tensor::Scalar(_) => self.clone(),
-            Tensor::NTensor(ten, n_dim) => if new_order.len() != *n_dim {
-                panic!("Transpose attempt had wrong amount of columns specified ({}), need {}", new_order.join(" "), &n_dim)
-            } else if new_order.iter().any(|x| x >= &n_dim) {
-                panic!("Transpose attempt had invalid index ({}), max is {} (0-based indexing)", new_order.join(" "), n_dim-1)
+            Tensor::NTensor(_, rank) => if new_order.len() != *rank {
+                panic!("Transpose attempt had wrong amount of columns specified ({}), need {}", 
+                    new_order.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "),
+                    &rank)
+            } else if new_order.iter().any(|x| x >= &rank) {
+                panic!("Transpose attempt had invalid index ({}), max is {} (0-based indexing)",
+                    new_order.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "),
+                    rank-1)
             } else {
-                let mut new_t = self.clone();
-
-                for (a, b) in get_least_swaps([0..n_dim-1].to_vec(), new_order.clone()) {
-                    new_t = new_t.transpose_swap(a, b);
-                }
-
-                new_t
+                let swaps = get_least_swaps(&mut (0..*rank as i32).map(|x| x as usize).collect(), &mut new_order.clone());
+                swaps.iter().fold(self.clone(), |new, (a, b)| new.transpose(*a, *b))
             }
         }
+    }
+
+    pub fn tensor_product(&self, other: &Tensor) -> Tensor {
+        match self {
+            Tensor::Scalar(val) => other * *val,
+            Tensor::NTensor(ten, rank) => Tensor::NTensor(ten.iter()
+                                                             .map(|t| t.tensor_product(other))
+                                                             .collect(),
+                                                          rank + other.rank()),
+        }
+    }
+
+    pub fn shape_as_string(&self) -> String {
+       self.shape().iter().map(|x| x.to_string()).collect::<Vec<_>>().join("x") 
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Tensor::Scalar(_) => 1,
+            Tensor::NTensor(data, _) => data.len(),
+        }
+    }
+
+    pub fn contract(&self, ranks_to_contract: Vec<usize>) -> Tensor {
+        match self {
+            Tensor::Scalar(_) => panic!("Attempted to contract a scalar."),
+            Tensor::NTensor(_, rank) => {
+                if ranks_to_contract.is_empty() {
+                    panic!("Contraction requires at least 1 dimension, 0 given");
+                }
+                if ranks_to_contract.iter().any(|&r| r >= *rank) {
+                    panic!("Given ranks {:?} contain a rank higher than that of the tensor ({})", ranks_to_contract, rank);
+                }
+                if ranks_to_contract.len() != ranks_to_contract.iter().collect::<std::collections::HashSet<_>>().len() {
+                    panic!("Duplicate ranks in contraction list");
+                }
+
+                let mut sorted_ranks = ranks_to_contract.clone();
+                sorted_ranks.sort_unstable();
+
+                // Check if dimensions to be contracted have the same length
+                let dim_sizes: Vec<usize> = sorted_ranks.iter().map(|&r| self.get_size(r)).collect();
+                if dim_sizes.windows(2).any(|w| w[0] != w[1]) {
+                    panic!("Dimensions to be contracted must have the same length. Sizes: {:?}", dim_sizes);
+                }
+
+                // Helper function to perform contraction
+                fn contract_helper(tensor: &Tensor, ranks: &[usize]) -> Tensor {
+                    match tensor {
+                        Tensor::Scalar(_) => panic!("Unexpected scalar encountered during contraction"),
+                        Tensor::NTensor(data, rank) => {
+                            if *rank < ranks.len() {
+                                panic!("Cannot contract tensor with rank less than number of contraction dimensions");
+                            }
+                            if ranks.is_empty() {
+                                return tensor.clone();
+                            }
+                            if ranks[0] == 0 {
+                                // Base case: contract the first dimension
+                                let result = data.iter().fold(Tensor::Scalar(0.0), |acc, t| &acc + t);
+                                if ranks.len() == 1 {
+                                    // If no more dimensions to contract, return the result
+                                    result
+                                } else {
+                                    // Continue contracting remaining dimensions
+                                    contract_helper(&result, &ranks[1..])
+                                }
+                            } else {
+                                // Recursive case: move towards the dimensions to contract
+                                Tensor::NTensor(
+                                    data.iter()
+                                        .map(|t| contract_helper(t, &ranks.iter().map(|&r| r - 1).collect::<Vec<_>>()))
+                                        .collect(),
+                                    rank - 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                contract_helper(self, &sorted_ranks)
+            }
+        }
+    }
+
+    fn perform_operand<F>(&self, other: &Tensor, operand: F) -> Tensor  // Used for add,
+                                                                         // times, etc.
+    where
+        F: Fn(&f32, &f32) -> f32, 
+    {
+        // Neither scalar and unmatching.
+        if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0) {
+            panic!("Mismatched dimensions: S ({}) - O ({})",
+                   self.shape_as_string(), other.shape_as_string());
+        }
+
+        match (self, other) {
+            (Tensor::Scalar(a), Tensor::Scalar(b)) => Tensor::Scalar(operand(a, b)),
+            (Tensor::NTensor(ten_a, rank), Tensor::NTensor(ten_b, _)) => 
+                if self.shape() != other.shape() {
+                    panic!("Attemped operand on tensors of different shapes:\n\t[{}]\n\t[{}]",
+                           self.shape_as_string(),
+                           other.shape_as_string())
+                } else {
+                    Tensor::NTensor(ten_a.iter()
+                                         .zip(ten_b)
+                                         .map(|(a, b)| a.perform_operand(b, &operand))
+                                         .collect::<Vec<_>>(),
+                                    *rank)
+                }
+            (Tensor::NTensor(ten, rank), scalar) | (scalar, Tensor::NTensor(ten, rank)) => 
+                Tensor::NTensor(ten.iter()
+                                     .map(|t| t.perform_operand(scalar, &operand))
+                                     .collect::<Vec<_>>(),
+                                *rank)
+        }
+    }
+
+    pub fn dot_product(&self, other: &Tensor) -> Tensor {
+        match (self, other) {
+            (Tensor::Scalar(a), Tensor::Scalar(b)) => Tensor::Scalar(a * b),
+            (Tensor::NTensor(ten, rank), scalar) | (scalar, Tensor::NTensor(ten, rank)) => 
+                Tensor::NTensor(ten.iter()
+                                   .map(|t| t.dot_product(scalar))
+                                   .collect(), 
+                                *rank),
+            (Tensor::NTensor(ten_a, _), Tensor::NTensor(ten_b, rank)) => 
+            // Neither scalar and unmatching.
+            if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0) {
+                panic!("Mismatched dimensions: S ({}) - O ({})",
+                       self.shape_as_string(), other.shape_as_string());
+            } else {
+                let tp = self.tensor_product(other);
+                
+                tp.contract()
+            }
+
+    }
+
+    pub fn hamarand_product(&self, other: &Tensor) -> Tensor {
+        // Neither scalar and unmatching.
+        if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0) {
+            panic!("Mismatched dimensions: S ({}) - O ({})",
+                   self.shape_as_string(), other.shape_as_string());
+        }
+
+        Tensor::perform_operand(self, other, |x, y| Mul::mul(x, y))
+    }
+}
+
+
+impl Add<&Tensor> for &Tensor {
+    type Output = Tensor;
+
+    fn add(self, other: &Tensor) -> Tensor {
+        Tensor::perform_operand(self, other, |x, y| Add::add(x, y))
+    }
+}
+
+impl Add<f32> for &Tensor {
+    type Output = Tensor;
+
+    fn add(self, other: f32) -> Tensor {
+        self + &Tensor::Scalar(other)
+    }
+}
+
+impl Add<f32> for Tensor {
+    type Output = Tensor;
+
+    fn add(self, other: f32) -> Tensor {
+        &self + &Tensor::Scalar(other)
+    }
+}
+
+
+impl Sub<&Tensor> for &Tensor {
+    type Output = Tensor;
+
+    fn sub(self, other: &Tensor) -> Tensor {
+        Tensor::perform_operand(self, other, |x, y| Sub::sub(x, y))
+    }
+}
+
+impl Sub<f32> for &Tensor {
+    type Output = Tensor;
+
+    fn sub(self, other: f32) -> Tensor {
+        self + &Tensor::Scalar(other)
+    }
+}
+
+impl Sub<f32> for Tensor {
+    type Output = Tensor;
+
+    fn sub(self, other: f32) -> Tensor {
+        &self + &Tensor::Scalar(other)
+    }
+}
+
+
+impl Div<&Tensor> for &Tensor {
+    type Output = Tensor;
+
+    fn div(self, other: &Tensor) -> Tensor {
+        Tensor::perform_operand(self, other, |x, y| Div::div(x, y))
+    }
+}
+
+impl Div<f32> for &Tensor {
+    type Output = Tensor;
+
+    fn div(self, other: f32) -> Tensor {
+        self + &Tensor::Scalar(other)
+    }
+}
+
+impl Div<f32> for Tensor {
+    type Output = Tensor;
+
+    fn div(self, other: f32) -> Tensor {
+        &self + &Tensor::Scalar(other)
+    }
+}
+
+
+impl Mul<&Tensor> for &Tensor {  // The fun one
+    type Output = Tensor;
+
+    fn mul(self, other: &Tensor) -> Tensor {
+        self.dot_product(other)
+    }
+}
+
+impl Mul<f32> for &Tensor {
+    type Output = Tensor;
+
+    fn mul(self, other: f32) -> Tensor {
+        self + &Tensor::Scalar(other)
+    }
+}
+
+impl Mul<f32> for Tensor {
+    type Output = Tensor;
+
+    fn mul(self, other: f32) -> Tensor {
+        &self + &Tensor::Scalar(other)
     }
 }
 
@@ -247,68 +546,15 @@ fn get_least_swaps(old: &mut Vec<usize>, new: &mut Vec<usize>) -> Vec<(usize, us
 }
 
 
-// This iter shit is all ChatGPT, not gonna lie.
-struct TensorIter<'a> {
-    stack: Vec<&'a Tensor>,  // Stack to hold nested items for depth-first iteration
-}
-
-impl<'a> Iterator for TensorIter<'a> {
-    type Item = &'a Tensor;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Pop from the stack
-        if let Some(current) = self.stack.pop() {
-            match current {
-                Tensor::Scalar(_) => Some(current),  // Return the scalar
-                Tensor::NTensor(vec, _) => {
-                    // Push the elements of the nested vector in reverse order onto the stack
-                    for item in vec.iter().rev() {
-                        self.stack.push(item);
-                    }
-                    self.next()  // Recursively call next() to get the next scalar or nested item
-                }
-            }
-        } else {
-            None  // No more items to iterate over
-        }
-    }
-}
-
-/* impl Tensor {
-    fn _perform_matrix_operand<F>(&self, other: &Matrix, operand: F) -> Matrix  // Used for add,
-                                                                                 // times, etc.
-    where
-        F: Fn(&f32, &f32) -> f32, 
-    {
-        Matrix::_create(&self.data
-                             .iter()
-                             .zip(other.data.iter())
-                             .map(|(s_row, o_row)| {
-                                 s_row.iter()
-                                      .zip(o_row.iter())
-                                      .map(|(s, o)| operand(s, o))
-                                      .collect::<Vec<f32>>()
-                             })
-                             .collect::<Vec<Vec<f32>>>()
-                            )
-    }
-
-    fn _perform_scalar_operand<F>(&self, scalar: &f32, operand: F) -> Matrix  // Used for add,
-                                                                                 // times, etc.
-    where
-        F: Fn(&f32, &f32) -> f32, 
-    {
-        Matrix::_create(&self.data
-                             .iter()
-                             .map(|row| {
-                                 row.iter()
-                                    .map(|x| operand(x, scalar))
-                                    .collect::<Vec<f32>>()
-                             })
-                             .collect::<Vec<Vec<f32>>>()
-                            )
-    }
-} */
+// TODO
+// TENSOR DOT PRODUCT
+// VECTOR SUM
+// Flatten(to dim_n)
+// Normalize
+    // sum(all): x^2 = 1
+// Eigen
+// Hamarand for mult (and div?)
+// Cross product
 
 
 /* #[derive(Debug)]
