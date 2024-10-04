@@ -300,7 +300,9 @@ impl Tensor {
                     panic!("Duplicate ranks in contraction list");
                 }
 
-                let mut sorted_ranks = ranks_to_contract.clone();
+                // Reverse the ranks to match the new logic
+                let reversed_ranks: Vec<usize> = ranks_to_contract.iter().map(|&r| rank - 1 - r).collect();
+                let mut sorted_ranks = reversed_ranks;
                 sorted_ranks.sort_unstable();
 
                 // Check if dimensions to be contracted have the same length
@@ -384,22 +386,15 @@ impl Tensor {
     pub fn dot_product(&self, other: &Tensor) -> Tensor {
         match (self, other) {
             (Tensor::Scalar(a), Tensor::Scalar(b)) => Tensor::Scalar(a * b),
-            (Tensor::NTensor(ten, rank), scalar) | (scalar, Tensor::NTensor(ten, rank)) => 
+            (Tensor::NTensor(ten, rank), Tensor::Scalar(_)) | (Tensor::Scalar(_), Tensor::NTensor(ten, rank)) => 
                 Tensor::NTensor(ten.iter()
-                                   .map(|t| t.dot_product(scalar))
+                                   .map(|t| t.dot_product(other))
                                    .collect(), 
                                 *rank),
-            (Tensor::NTensor(ten_a, _), Tensor::NTensor(ten_b, rank)) => 
-            // Neither scalar and unmatching.
-            if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0) {
-                panic!("Mismatched dimensions: S ({}) - O ({})",
-                       self.shape_as_string(), other.shape_as_string());
-            } else {
-                let tp = self.tensor_product(other);
-                
-                tp.contract()
-            }
-
+            (Tensor::NTensor(_, _), Tensor::NTensor(_, rank)) => 
+                self.tensor_product(other)  // Contracting innermost dim of LHS and outermost of RHS
+                    .contract(vec![rank-1, *rank])
+        }
     }
 
     pub fn hamarand_product(&self, other: &Tensor) -> Tensor {
@@ -413,6 +408,9 @@ impl Tensor {
     }
 }
 
+
+// All operators with 2 tensors are Hamarand style
+// (except for multiplication, which is the dot product)
 
 impl Add<&Tensor> for &Tensor {
     type Output = Tensor;
@@ -547,14 +545,11 @@ fn get_least_swaps(old: &mut Vec<usize>, new: &mut Vec<usize>) -> Vec<(usize, us
 
 
 // TODO
-// TENSOR DOT PRODUCT
-// VECTOR SUM
 // Flatten(to dim_n)
 // Normalize
     // sum(all): x^2 = 1
 // Eigen
-// Hamarand for mult (and div?)
-// Cross product
+// Cross product (Vector)
 
 
 /* #[derive(Debug)]
