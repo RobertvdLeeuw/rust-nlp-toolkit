@@ -3,13 +3,14 @@ use std::iter::{FromIterator, Iterator, Sum};
 use std::marker::PhantomData;
 use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 
+/// The object that holds all the data for tensors. Its recursion allows tensors of arbitrary ranks
 #[derive(Clone, Debug)]
 pub enum TensorData {
     Scalar(f32),
     NTensor(Vec<TensorData>),
 }
 
-
+/// Implementation for common tools like indexing, creating from vec, and summing.
 impl Index<usize> for TensorData {
     type Output = TensorData;
     fn index(&self, index: usize) -> &Self::Output {
@@ -66,6 +67,7 @@ impl Sum for TensorData {
 
 
 impl TensorData {
+    /// Returns the size of the tensor. Example: 2x3 matrix -> [2, 3], vector of length 4 -> [4].
     fn shape(&self) -> Vec<usize> {
         match self {
             TensorData::Scalar(_) => vec![],
@@ -90,7 +92,7 @@ impl TensorData {
     }
 
     fn filled(value: f32, shape: Vec<usize>) -> TensorData {
-        if shape.is_empty() {
+        if shape.is_empty() {  // Reached 'bottom', base case.'
             return TensorData::Scalar(value);
         }
 
@@ -98,8 +100,8 @@ impl TensorData {
                                  shape[0]])
     }
 
-    fn perform_operand<F>(&self, other: &TensorData, operand: F) -> TensorData  // Used for add,
-                                                                                // times, etc.
+    /// Used for add, times, etc.
+    fn perform_operand<F>(&self, other: &TensorData, operand: F) -> TensorData
     where
         F: Fn(f32, f32) -> f32 + Copy, 
     {
@@ -161,16 +163,20 @@ impl TensorData {
         }
     }
 
+    /// Basically replaces every scalar in self with other scaled by it, and returns a tensor(data)
+    /// of rank (self.rank + other.rank)
     fn tensor_product(&self, other: &TensorData) -> TensorData {
         match self {
             TensorData::Scalar(val) => other * *val,
             TensorData::NTensor(ten) => TensorData::NTensor(ten.iter()
-                                                                     .map(|t| t.tensor_product(other))
-                                                                     .collect())
+                                                               .map(|t| t.tensor_product(other))
+                                                               .collect())
         }
     }
 
-     fn contract(&self, ranks_to_contract: Vec<usize>) -> TensorData {
+    /// Shrinks the tensor (by the emount of contracted ranks). I do not know how to explain this
+    /// in brief, watch a video about it.
+    fn contract(&self, ranks_to_contract: Vec<usize>) -> TensorData {
         match self {
             TensorData::Scalar(_) => panic!("Attempted to contract a scalar."),
             TensorData::NTensor(_) => {
@@ -232,12 +238,15 @@ impl TensorData {
         }
     }
 
-    fn identity(size: usize, dimensions: usize) -> TensorData {
+    /// Returns a tensor of the rank given rank and size
+    /// where T[i][j]..[n] = 1 if i==j==...==n else 0.
+    /// Basically filled with 0 but with a line of 1's diagonal through all dimensions.
+    fn identity(size: usize, rank: usize) -> TensorData {
         if size <= 0 {
             panic!("Size must be > 0");
         }
 
-        if dimensions == 0 {
+        if rank == 0 {
             return TensorData::Scalar(1.0);
         }
 
@@ -262,16 +271,17 @@ impl TensorData {
             }
         }
         
-        TensorData::filled(0.0, vec![size; dimensions]).iter()
-                                                       .zip(0..size)
-                                                       .map(|(t, i)| {
-                                                            let mut t_clone = t.clone();
-                                                            t_clone[i] = recursive_traverse(&t_clone[i], i);
-                                                            t_clone
-                                                       })
+        TensorData::filled(0.0, vec![size; rank]).iter()
+                                                 .zip(0..size)
+                                                 .map(|(t, i)| {
+                                                      let mut t_clone = t.clone();
+                                                      t_clone[i] = recursive_traverse(&t_clone[i], i);
+                                                      t_clone
+                                                 })
                                                        .collect()
     }
 
+    /// Helper function
     fn get_element(&self, dim: usize, index: usize) -> TensorData {
         match self {
             TensorData::Scalar(_) => self.clone(),
@@ -285,6 +295,7 @@ impl TensorData {
         }
     }
 
+    /// Helper function
     fn get_slice(&self, dim: usize, index: usize) -> TensorData {
         match self {
             TensorData::Scalar(_) => self.clone(),
@@ -341,6 +352,7 @@ impl TensorData {
         }
     }
 
+    /// A collection of transposes requested via the entire reordering of the dimensions.
     fn full_transpose(&self, new_order: Vec<usize>) -> TensorData {
         match self {
             TensorData::Scalar(_) => self.clone(),
@@ -359,6 +371,9 @@ impl TensorData {
         }
     }
 
+    /// Typical matrix multiplication generalized to all tensors. 
+    /// Returns the tensor product of self and other contranked on the innermost dimension of self
+    /// and outermost of other.
     fn dot_product(&self, other: &TensorData) -> TensorData {
         match (self, other) {
             (TensorData::Scalar(a), TensorData::Scalar(b)) => TensorData::Scalar(a * b),
@@ -372,6 +387,8 @@ impl TensorData {
         }
     }
 
+    /// T1 * T2, where a new tensor of the same shape is returned 
+    /// where T[i][j]... = T1[i][j]... * T2[i][j]...
     fn hamarand_product(&self, other: &TensorData) -> TensorData {
         // Neither scalar and unmatching.
         if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0) {
@@ -398,8 +415,8 @@ pub struct Tensor<const RANK: usize> {
     _phantom: PhantomData<[(); RANK]>,
 }
 
-// Implementations for Tensor<RANK>
 
+/// Implementation for common tools like indexing, creating from vec, and summing.
 impl<const RANK: usize> Index<usize> for Tensor<RANK> {
     type Output = TensorData;
     
@@ -410,7 +427,6 @@ impl<const RANK: usize> Index<usize> for Tensor<RANK> {
         }
     }
 }
-
 
 impl<const RANK: usize> IndexMut<usize> for Tensor<RANK> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
@@ -469,6 +485,9 @@ impl<const RANK: usize> Sum for Tensor<RANK> {
 
 
 impl<const RANK: usize> Tensor<RANK> {
+    /// Most of this is just a 'frontend' for TensorData, 'real' code and documentation can be
+    /// found there.
+
     pub fn from_td(td: &TensorData) -> Tensor<RANK> {
         Tensor {
             data: td.clone(),
@@ -476,7 +495,7 @@ impl<const RANK: usize> Tensor<RANK> {
         }
     }
 
-    fn iter(&self) -> TensorIter<RANK> {
+    pub fn iter(&self) -> TensorIter<RANK> {
         match &self.data {
             TensorData::Scalar(_) => TensorIter::Scalar(std::iter::once(self)),
             TensorData::NTensor(vec) => TensorIter::NTensor(vec.iter()),
@@ -775,7 +794,6 @@ fn get_least_swaps(old: &mut Vec<usize>, new: &mut Vec<usize>) -> Vec<(usize, us
 // Normalize
     // sum(all): x^2 = 1
 // Eigen
-// Cross product (Vector)
 // Cosine similarity
 
 // Type aliases for common tensor ranks
