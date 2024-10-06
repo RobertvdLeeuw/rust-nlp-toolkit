@@ -101,31 +101,40 @@ impl TensorData {
     fn perform_operand<F>(&self, other: &TensorData, operand: F) -> TensorData  // Used for add,
                                                                                 // times, etc.
     where
-        F: Fn(f32, f32) -> f32, 
+        F: Fn(f32, f32) -> f32 + Copy, 
     {
-        if self.shape() != other.shape() {
+        if self.shape() != other.shape() && (self.rank() > 0 && other.rank() > 0){
             panic!("Mismatched shapes: S ({}) - O ({})",
                    self.shape_as_string(), other.shape_as_string());
         }
 
-        match (self, other) {
-            (TensorData::Scalar(a), TensorData::Scalar(b)) => TensorData::Scalar(operand(*a, *b)),
-            (TensorData::NTensor(ten_a), TensorData::NTensor(ten_b)) => 
-                if self.shape() != other.shape() {
-                    panic!("Attemped operand on tensors of different shapes:\n\t[{}]\n\t[{}]",
-                           self.shape_as_string(),
-                           other.shape_as_string())
-                } else {
-                    TensorData::NTensor(ten_a.iter()
-                                         .zip(ten_b)
-                                         .map(|(a, b)| a.perform_operand(b, &operand))
-                                         .collect::<Vec<_>>())
-                }
-            (TensorData::NTensor(ten), scalar) | (scalar, TensorData::NTensor(ten)) => 
-                TensorData::NTensor(ten.iter()
-                                     .map(|t| t.perform_operand(scalar, &operand))
-                                     .collect::<Vec<_>>())
+        fn apply_operand<F>(a: &TensorData, b: &TensorData, operand: F) -> TensorData
+        where
+            F: Fn(f32, f32) -> f32 + Copy,
+        {
+            match (a, b) {
+                (TensorData::Scalar(x), TensorData::Scalar(y)) => TensorData::Scalar(operand(*x, *y)),
+                (TensorData::NTensor(ten_a), TensorData::NTensor(ten_b)) => {
+                    TensorData::NTensor(
+                        ten_a.iter()
+                            .zip(ten_b.iter())
+                            .map(|(a, b)| apply_operand(a, b, operand))
+                            .collect()
+                    )
+                },
+                (TensorData::NTensor(ten), TensorData::Scalar(scalar)) |
+                (TensorData::Scalar(scalar), TensorData::NTensor(ten)) => {
+                    TensorData::NTensor(
+                        ten.iter()
+                            .map(|t| apply_operand(t, &TensorData::Scalar(*scalar), operand))
+                            .collect()
+                    )
+                },
+                _ => unreachable!("Shapes were checked at the beginning of perform_operand"),
+            }
         }
+
+        apply_operand(self, other, operand)
     }
 
     fn len(&self, dim: usize) -> usize {
@@ -247,7 +256,9 @@ impl TensorData {
                     
                     TensorData::NTensor(vec)
                 },
-                _ => panic!("Recursive traverse error, write this later!"),
+                TensorData::Scalar(_) => {
+                    TensorData::Scalar(1.0)
+                }
             }
         }
         
@@ -390,42 +401,32 @@ pub struct Tensor<const RANK: usize> {
 // Implementations for Tensor<RANK>
 
 impl<const RANK: usize> Index<usize> for Tensor<RANK> {
-    type Output = Tensor<{RANK - 1}>;
-
+    type Output = TensorData;
+    
     fn index(&self, index: usize) -> &Self::Output {
         match &self.data {
             TensorData::Scalar(_) => panic!("Attempted to index a scalar value"),
-            TensorData::NTensor(vec) => {
-                &Tensor {
-                    data: vec[index].clone(),
-                    _phantom: PhantomData,
-                }
-            }
+            TensorData::NTensor(vec) => &vec[index],
         }
     }
 }
+
 
 impl<const RANK: usize> IndexMut<usize> for Tensor<RANK> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         match &mut self.data {
             TensorData::Scalar(_) => panic!("Attempted to index a scalar value"),
-            TensorData::NTensor(vec) => {
-                &mut Tensor {
-                    data: vec[index].clone(),
-                    _phantom: PhantomData,
-                }
-            }
+            TensorData::NTensor(vec) => &mut vec[index],
         }
     }
 }
 
 impl<T, const RANK: usize> FromIterator<T> for Tensor<RANK>
 where
-    T: Clone,
-    [(); RANK + 1]: Sized,
+    T: Into<TensorData> + Clone,
 {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let vec: Vec<T> = iter.into_iter().collect();
+        let vec: Vec<TensorData> = iter.into_iter().map(|item| item.into()).collect();
 
         Tensor {
             data: TensorData::NTensor(vec),
@@ -503,7 +504,7 @@ impl<const RANK: usize> Tensor<RANK> {
 
     fn perform_operand<F>(&self, other: &Tensor<RANK>, operand: F) -> Tensor<RANK>
     where
-        F: Fn(f32, f32) -> f32, 
+        F: Fn(f32, f32) -> f32 + Copy, 
     {
         Tensor::<RANK> {
             data: self.data.perform_operand(&other.data, operand),
@@ -527,9 +528,23 @@ impl<const RANK: usize> Tensor<RANK> {
         Tensor::from_td(&self.data.hamarand_product(&other.data))
     }
 
-    // TODO: Proper tensor/dot product and contract exposure (operations with tensors of different
-    // ranks).
 }
+
+/* impl<const SELFRANK: usize, const OTHERRANK: usize> Tensor<SELFRANK> {
+    pub fn tensor_product(&self, other: &Tensor<OTHERRANK>) -> Tensor<{SELFRANK + OTHERANK - 1}> {
+        Tensor::<{SELFRANK + OTHERANK - 1}> {
+            data: self.data.tensor_product(&other.data),
+            _phantom: PhantomData
+        }
+    }
+
+    pub fn contract(&self, ranks_to_contract: Vec<usize>) -> Tensor<{RANK - ranks_to_contract.len()}> {
+        Tensor::<{RANK - ranks_to_contract.len()}> {
+            data: self.data.contract(ranks_to_contract),
+            _phantom: PhantomData
+        }
+    }
+} */
 
 
 // All operators with 2 tensors are Hamarand style
@@ -761,6 +776,7 @@ fn get_least_swaps(old: &mut Vec<usize>, new: &mut Vec<usize>) -> Vec<(usize, us
     // sum(all): x^2 = 1
 // Eigen
 // Cross product (Vector)
+// Cosine similarity
 
 // Type aliases for common tensor ranks
 pub type Scalar = Tensor<0>;
@@ -795,21 +811,23 @@ impl Vector {
         }
     }
 
-    pub fn cross_product(&self, other: &Vector) -> Scalar {
+    pub fn cross_product(&self, other: &Vector) -> Vector {
         if self.len(0) != 3 || other.len(0) != 3 {
             panic!("Tried to get the cross product of vectors of wrong length ({}, {}), expected 3.", self.len(0), other.len(0))
         }
 
-        let mut scalar = Scalar::from(0.0);
+        // TODO: automatic casting to f32 to remove .value() everywhere.
+        Vector::from(vec![self[1].value()*other[2].value() - self[2].value()*other[1].value(), 
+                          self[2].value()*other[0].value() - self[0].value()*other[2].value(), 
+                          self[0].value()*other[1].value() - self[1].value()*other[0].value()])
+    }
 
-        for (a, b) in self.data.iter().zip(other.data.iter()).collect::<Vec<(TensorData, TensorData)>>() {
-            match (a, b) {
-                (TensorData::Scalar(a), TensorData::Scalar(b)) => scalar = scalar + (a * b),
-                _ => panic!("Encountered a tensor of rank > 1 while calculating cross product.")
-            }
-        }
-
-        scalar
+    pub fn print(&self) -> String {
+        self.data
+            .iter()
+            .map(|s| s.value().to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
     }
 }
 
@@ -824,7 +842,7 @@ impl Matrix {
         })
     }
 
-     fn get_cofactor(&self, p: usize, q: usize) -> f32 {
+     pub fn get_cofactor(&self, p: usize, q: usize) -> f32 {
         let n = self.shape()[0];  // TODO: Back to declarative.
         let mut cofactor = Vec::new();
         for i in 0..n {
@@ -840,11 +858,11 @@ impl Matrix {
             }
             cofactor.push(row);
         }
-        let minor = Matrix::from(cofactor).unwrap();
+        let minor = Matrix::from(cofactor).expect("Impossible error during cofactor matrix creation");
         f32::powi(-1.0, (p + q) as i32) * minor.calc_determinant()
     }
 
-    fn calc_determinant(&self) -> f32 {  // TODO: Rewrite without recursion + matrix creation and
+    pub fn calc_determinant(&self) -> f32 {  // TODO: Rewrite without recursion + matrix creation and
                                           // compare speed.
         if self.shape()[0] == 2 {
             return self.data[0][0].value() * self.data[1][1].value() - self.data[0][1].value() * self.data[1][0].value();
@@ -854,7 +872,7 @@ impl Matrix {
                             .sum()
     }
 
-    fn get_cofactor_matrix(&self) -> Matrix {  // TODO: All this shit as attributes.
+    pub fn get_cofactor_matrix(&self) -> Matrix {  // TODO: All this shit as attributes.
         let data: Vec<TensorData> = (0..self.shape()[0])
             .map(|i| (0..self.shape()[1])
                 .map(|j| TensorData::Scalar(self.get_cofactor(i, j)))
@@ -867,7 +885,7 @@ impl Matrix {
         }
     }
 
-    fn get_determinant(&self) -> Result<f32, String> {
+    pub fn get_determinant(&self) -> Result<f32, String> {
         if self.shape()[0] != self.shape()[1] {
             return Err(format!("Only square matrices have determinants ({}x{})", self.shape()[0], self.shape()[1]));
         }
@@ -879,7 +897,7 @@ impl Matrix {
         }
     }
 
-    fn inverse(&self) -> Result<Matrix, String> {
+    pub fn inverse(&self) -> Result<Matrix, String> {
         let det: f32;
 
         match self.get_determinant() {
@@ -892,46 +910,119 @@ impl Matrix {
         Ok(&adjugate / det)
     }
 
-    fn print(&self, title: &str) {
+    pub fn print(&self, title: &str) {
         println!("-------- {} ({}x{}) --------", title, self.shape()[0], self.shape()[1]);
 
         for row in self.data.iter() {
-            println!("{:?}", row);
+            println!("| {} |", Vector::from_td(&row).print());
         }
 
         println!("-----------------------------");
     }
 }
 
+
 fn main() {
+    // Test case 1: Basic Matrix operations
     let matrix1 = Matrix::from(vec![
         vec![1.0, 2.0, 3.0],
         vec![4.0, 5.0, 6.0],
-    ])
-    .expect("");
-
-    matrix1.print("Base 1");
+    ]).expect("Failed to create matrix1");
 
     let matrix2 = Matrix::from(vec![
-        vec![1.0, 2.0, 3.0, 9.0],
-        vec![4.0, 5.0, 6.0, 12.0],
-        vec![3.0, 4.0, 8.0, 7.0],
-        vec![2.0, 1.0, 1.0, 1.0],
-    ])
-    .expect("");
+        vec![7.0, 8.0],
+        vec![9.0, 10.0],
+        vec![11.0, 12.0],
+    ]).expect("Failed to create matrix2");
 
-    matrix2.print("Base 2");
+    matrix1.print("Matrix 1");
+    matrix2.print("Matrix 2");
 
-    (&matrix1 + &matrix1). print("Double");
-    (&matrix1 - 3.0).print("Plus 3");
+    // Test case 2: Matrix multiplication
+    (&matrix1 * &matrix2).print("Matrix 1 * Matrix 2");
 
-    matrix1.transpose(0, 1).print("Transposed");
+    // Test case 3: Element-wise operations
+    let matrix3 = Matrix::from(vec![
+        vec![1.0, 2.0, 3.0],
+        vec![4.0, 5.0, 6.0],
+    ]).expect("Failed to create matrix3");
 
-    Matrix::identity(3, 2).transpose(0, 1).print("Identity");
-    Matrix::filled(8.0, vec![3, 6]).transpose(0, 1).print("Filled");
+    (&matrix1 + &matrix3).print("Matrix 1 + Matrix 3 (element-wise addition)");
+    (&matrix1 - &matrix3).print("Matrix 1 - Matrix 3 (element-wise subtraction)");
+    matrix1.hamarand_product(&matrix3).print("Matrix 1 * Matrix 3 (Hadamard product)");
 
-    (&matrix1 * &matrix1.transpose(0, 1)).print("Times");
+    // Test case 4: Scalar operations
+    (&matrix1 * 2.0).print("Matrix 1 * 2");
+    (&matrix1 / 2.0).print("Matrix 1 / 2");
 
-    println!("DETERMINANT: {}", matrix2.get_determinant().expect(""));
-    matrix2.inverse().expect("").print("Inverse");
+    // Test case 5: Transposition
+    matrix1.transpose(0, 1).print("Matrix 1 Transposed");
+
+    // Test case 6: Identity matrix
+    Matrix::identity(3, 2).print("3x3 Identity Matrix");
+
+    // Test case 7: Filled matrix
+    Matrix::filled(8.0, vec![2, 3]).print("2x3 Matrix filled with 8.0");
+
+    // Test case 8: Determinant and Inverse
+    let square_matrix = Matrix::from(vec![
+        vec![1.0, 2.0, 3.0],
+        vec![4.0, 5.0, 6.0],
+        vec![7.0, 8.0, 9.0],
+    ]).expect("Failed to create square_matrix");
+
+    square_matrix.print("Square Matrix");
+    println!("Determinant of Square Matrix: {}", square_matrix.get_determinant().expect("Failed to calculate determinant"));
+
+    match square_matrix.inverse() {
+        Ok(inv) => inv.print("Inverse of Square Matrix"),
+        Err(e) => println!("Error calculating inverse: {}", e),
+    }
+
+    // Test case 9: Vector operations
+    let vector1 = Vector::from(vec![1.0, 2.0, 3.0]);
+    let vector2 = Vector::from(vec![4.0, 5.0, 6.0]);
+
+    println!("Vector 1: {}", vector1.print());
+    println!("Vector 2: {}", vector2.print());
+
+    let cross_product = vector1.cross_product(&vector2);
+    println!("Cross product of Vector 1 and Vector 2: {}", cross_product.print());
+
+    // Test case 10: Scalar operations
+    let scalar1 = Scalar::from(5.0);
+    let scalar2 = Scalar::from(3.0);
+
+    println!("Scalar 1: {}", scalar1.unwrap());
+    println!("Scalar 2: {}", scalar2.unwrap());
+    println!("Scalar 1 + Scalar 2: {}", (&scalar1 + &scalar2).unwrap());
+    println!("Scalar 1 * Scalar 2: {}", (&scalar1 * &scalar2).unwrap());
+
+    // Test case 11: Mixed rank operations
+    let vector_result = &vector1 * scalar1.unwrap();
+    println!("Vector 1 * Scalar 1: {}", vector_result.print());
+
+    let matrix_result = &square_matrix * scalar2.unwrap();
+    matrix_result.print("Square Matrix * Scalar 2");
+
+    // Test case 12: Error handling
+    let non_square_matrix = Matrix::from(vec![
+        vec![1.0, 2.0, 3.0],
+        vec![4.0, 5.0, 6.0],
+    ]).expect("Failed to create non_square_matrix");
+
+    match non_square_matrix.inverse() {
+        Ok(_) => println!("This should not happen"),
+        Err(e) => println!("Expected error: {}", e),
+    }
+
+    // Test case 13: Full transpose
+    let matrix4 = Matrix::from(vec![
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![5.0, 6.0, 7.0, 8.0],
+        vec![9.0, 10.0, 11.0, 12.0],
+    ]).expect("Failed to create matrix4");
+
+    matrix4.print("Matrix 4");
+    matrix4.full_transpose(vec![1, 0]).print("Matrix 4 fully transposed");
 }
