@@ -164,6 +164,9 @@ impl<const RANK: usize> Tensor<RANK> {
 
 // All operators with 2 tensors are Hamarand style
 // (except for multiplication, which is the dot product)
+
+/// I hate how big this is, but without a macro it would be 3 times bigger. 
+/// And yes, this is mostly the work of Claude.ai
 macro_rules! impl_tensor_op {
     ($trait:ident, $method:ident, $op:expr) => {
         impl<const RANK: usize> $trait for &Tensor<RANK> {
